@@ -13,6 +13,7 @@ import {
   ChannelType,
   PermissionFlagsBits,
 } from "discord.js";
+import type { Interaction } from "discord.js";
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, FRONTEND_URL, PORT } = process.env;
 
@@ -21,17 +22,19 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !FRONTEND_URL) {
   process.exit(1);
 }
 
+// Initialize Discord bot
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
 });
 
+// Initialize Express webhook server
 const app = express();
 app.use(bodyParser.json());
 
 // Bot Ready
 client.once("ready", () => console.log(`Logged in as ${client.user?.tag}`));
 
-// Register Commands
+// Register slash commands
 const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
 async function registerCommands() {
   const commands = [
@@ -46,48 +49,17 @@ async function registerCommands() {
           type: 7, // CHANNEL
           required: true,
         },
-        {
-          name: "title",
-          description: "Embed title",
-          type: 3,
-          required: false,
-        },
-        {
-          name: "description",
-          description: "Embed description",
-          type: 3,
-          required: false,
-        },
+        { name: "title", description: "Embed title", type: 3 },
+        { name: "description", description: "Embed description", type: 3 },
         {
           name: "color",
-          description: "Embed color (hex, e.g. #00ff99)",
+          description: "Embed color hex (e.g. #00ff99)",
           type: 3,
-          required: false,
         },
-        {
-          name: "footer_text",
-          description: "Footer text",
-          type: 3,
-          required: false,
-        },
-        {
-          name: "footer_url",
-          description: "Footer icon URL",
-          type: 3,
-          required: false,
-        },
-        {
-          name: "thumbnail",
-          description: "Thumbnail URL",
-          type: 3,
-          required: false,
-        },
-        {
-          name: "image",
-          description: "Large image URL",
-          type: 3,
-          required: false,
-        },
+        { name: "footer_text", description: "Footer text", type: 3 },
+        { name: "footer_url", description: "Footer icon URL", type: 3 },
+        { name: "thumbnail", description: "Thumbnail URL", type: 3 },
+        { name: "image", description: "Large image URL", type: 3 },
       ],
       default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
     },
@@ -98,10 +70,11 @@ async function registerCommands() {
   });
 }
 
-// Handle Interactions
-client.on("interactionCreate", async (interaction) => {
-  // Handle /verify
+// Unified interaction handler
+client.on("interactionCreate", async (interaction: Interaction) => {
+  // Slash commands
   if (interaction.isChatInputCommand()) {
+    // /verify
     if (interaction.commandName === "verify") {
       const discordId = interaction.user.id;
       const link = `${FRONTEND_URL}/verify?discordId=${discordId}`;
@@ -115,7 +88,7 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
-    // Handle /createverifyembed
+    // /createverifyembed
     if (interaction.commandName === "createverifyembed") {
       const channel = interaction.options.getChannel("channel", true);
       if (channel?.type !== ChannelType.GuildText) {
@@ -147,18 +120,33 @@ client.on("interactionCreate", async (interaction) => {
       if (image) embed.setImage(image);
 
       const button = new ButtonBuilder()
+        .setCustomId("verify_button")
         .setLabel("Verify Wallet")
-        .setStyle(ButtonStyle.Link)
-        .setURL(`${FRONTEND_URL}/verify?discordId=__USERID__`);
+        .setStyle(ButtonStyle.Success);
 
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(button);
 
-      // Send embed with dynamic button
       await (channel as any).send({ embeds: [embed], components: [row] });
       await interaction.reply({
         content: `Verification embed created in ${channel}`,
         ephemeral: true,
       });
+    }
+  }
+
+  // Button interactions
+  if (interaction.isButton()) {
+    if (interaction.customId === "verify_button") {
+      const discordId = interaction.user.id;
+      const link = `${FRONTEND_URL}/verify?discordId=${discordId}`;
+
+      const embed = new EmbedBuilder()
+        .setTitle("Verify Your Wallet")
+        .setDescription(`[Click here to verify your wallet](${link})`)
+        .setColor(0x00ff99)
+        .setFooter({ text: "You only need to verify once." });
+
+      await interaction.reply({ embeds: [embed], ephemeral: true });
     }
   }
 });
