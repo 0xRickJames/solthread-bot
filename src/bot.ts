@@ -39,6 +39,7 @@ async function registerCommands() {
   });
 }
 
+// Slash command for verification link
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName === "verify") {
@@ -57,8 +58,11 @@ client.on("interactionCreate", async (interaction) => {
 
 // Webhook to assign multiple roles
 app.post("/webhook", async (req, res) => {
+  console.log("Incoming webhook payload:", req.body);
+
   const { discordId, roles } = req.body;
   if (!discordId || !roles || !Array.isArray(roles)) {
+    console.log("Invalid payload:", req.body);
     return res.status(400).send("Invalid payload");
   }
 
@@ -77,14 +81,14 @@ app.post("/webhook", async (req, res) => {
 
     res.send("Roles assigned");
   } catch (err) {
-    console.error(err);
+    console.error("Error assigning roles:", err);
     res.status(500).send("Error assigning roles");
   }
 });
 
 // Start Express webhook server
-app.listen(Number(PORT), () =>
-  console.log(`Webhook listening on port ${PORT}`)
+app.listen(Number(PORT) || 3001, () =>
+  console.log(`Webhook listening on port ${PORT || 3001}`)
 );
 
 // Start bot
