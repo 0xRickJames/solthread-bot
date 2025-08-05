@@ -142,7 +142,7 @@ client.on("interactionCreate", async (interaction) => {
         .setColor(parseInt(colorHex.replace("#", ""), 16));
 
       if (footerText)
-        embed.setFooter({ text: footerText, iconURL: footerUrl || null });
+        embed.setFooter({ text: footerText, iconURL: footerUrl || "" });
       if (thumbnail) embed.setThumbnail(thumbnail);
       if (image) embed.setImage(image);
 
