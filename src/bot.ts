@@ -151,10 +151,11 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   }
 });
 
-// Webhook to assign roles
+// Webhook to assign roles (now refreshes roles fully)
 app.post("/webhook", async (req, res) => {
   console.log("Incoming webhook payload:", req.body);
   const { discordId, roles } = req.body;
+
   if (!discordId || !roles || !Array.isArray(roles)) {
     console.log("Invalid payload:", req.body);
     return res.status(400).send("Invalid payload");
@@ -164,7 +165,42 @@ app.post("/webhook", async (req, res) => {
     const guild = await client.guilds.fetch(GUILD_ID!);
     const member = await guild.members.fetch(discordId);
 
-    for (const roleId of roles) {
+    // Get current roles assigned to the member in the guild
+    const currentRoles = member.roles.cache.map((r) => r.id);
+
+    // Your role IDs from environment
+    const managedRoles = [
+      process.env.ROLE_ANY,
+      process.env.ROLE_1K,
+      process.env.ROLE_10K,
+      process.env.ROLE_100K,
+    ].filter(Boolean);
+
+    // Determine which roles to remove (ones we manage but aren't in new list)
+    const rolesToRemove = currentRoles.filter(
+      (roleId) => managedRoles.includes(roleId) && !roles.includes(roleId)
+    );
+
+    // Determine which roles to add (in new list but not currently assigned)
+    const rolesToAdd = roles.filter(
+      (roleId: string) => !currentRoles.includes(roleId)
+    );
+
+    // Remove outdated roles
+    for (const roleId of rolesToRemove) {
+      try {
+        await member.roles.remove(roleId);
+        console.log(`Removed role ${roleId} from ${discordId}`);
+      } catch (err) {
+        console.error(
+          `Failed to remove role ${roleId} from ${discordId}:`,
+          err
+        );
+      }
+    }
+
+    // Add new roles
+    for (const roleId of rolesToAdd) {
       try {
         await member.roles.add(roleId);
         console.log(`Assigned role ${roleId} to ${discordId}`);
@@ -173,7 +209,7 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    res.send("Roles assigned");
+    res.send("Roles synchronized");
   } catch (err) {
     console.error("Error assigning roles:", err);
     res.status(500).send("Error assigning roles");
