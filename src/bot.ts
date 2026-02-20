@@ -136,7 +136,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
           .setTitle("Verify Your Wallet")
           .setDescription(`[Click here to verify your wallet](${link})`)
           .setColor(0x00ff99)
-          .setFooter({ text: "Link expires in 10 minutes. You only need to verify once." });
+          .setFooter({ text: "Link expires in 10 minutes." });
 
         await interaction.reply({ embeds: [embed], ephemeral: true });
       } catch (err) {
@@ -211,7 +211,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
           .setTitle("Verify Your Wallet")
           .setDescription(`[Click here to verify your wallet](${link})`)
           .setColor(0x00ff99)
-          .setFooter({ text: "Link expires in 10 minutes. You only need to verify once." });
+          .setFooter({ text: "Link expires in 10 minutes." });
 
         await interaction.reply({ embeds: [embed], ephemeral: true });
       } catch (err) {
