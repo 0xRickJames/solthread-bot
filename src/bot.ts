@@ -1,4 +1,5 @@
 import "dotenv/config";
+import axios from "axios";
 import express from "express";
 import bodyParser from "body-parser";
 import {
@@ -15,11 +16,61 @@ import {
 } from "discord.js";
 import type { Interaction } from "discord.js";
 
-const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, FRONTEND_URL, PORT } = process.env;
+const {
+  DISCORD_TOKEN,
+  CLIENT_ID,
+  GUILD_ID,
+  FRONTEND_URL,
+  PORT,
+  BOT_INTERNAL_SECRET,
+} = process.env;
 
-if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !FRONTEND_URL) {
+if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !FRONTEND_URL || !BOT_INTERNAL_SECRET) {
   console.error("Missing required environment variables.");
   process.exit(1);
+}
+
+const VERIFY_API_URL = "https://verify.omnipair.fi/api/issue-verify-token";
+const VERIFY_LINK_BASE = "https://verify.omnipair.fi/verify";
+
+interface IssueTokenResponse {
+  token: string;
+  expiresAt: string;
+}
+
+async function issueVerifyToken(discordId: string): Promise<IssueTokenResponse> {
+  const res = await axios.post<IssueTokenResponse>(
+    VERIFY_API_URL,
+    { discordId },
+    {
+      headers: {
+        Authorization: `Bearer ${BOT_INTERNAL_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      validateStatus: () => true,
+    }
+  );
+
+  if (res.status === 401) {
+    console.error(
+      "Verification API returned 401: BOT_INTERNAL_SECRET is wrong or missing."
+    );
+    throw new Error(
+      "Verification service is misconfigured. Please contact the server administrator."
+    );
+  }
+
+  if (res.status >= 400) {
+    console.error(
+      `Verification API error ${res.status}:`,
+      JSON.stringify(res.data)
+    );
+    throw new Error(
+      "Verification service is temporarily unavailable. Please try again later."
+    );
+  }
+
+  return res.data;
 }
 
 // Initialize Discord bot
@@ -77,15 +128,25 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     // /verify
     if (interaction.commandName === "verify") {
       const discordId = interaction.user.id;
-      const link = `${FRONTEND_URL}/verify?discordId=${discordId}`;
+      try {
+        const { token } = await issueVerifyToken(discordId);
+        const link = `${VERIFY_LINK_BASE}?token=${token}`;
 
-      const embed = new EmbedBuilder()
-        .setTitle("Verify Your Wallet")
-        .setDescription(`[Click here to verify your wallet](${link})`)
-        .setColor(0x00ff99)
-        .setFooter({ text: "You only need to verify once." });
+        const embed = new EmbedBuilder()
+          .setTitle("Verify Your Wallet")
+          .setDescription(`[Click here to verify your wallet](${link})`)
+          .setColor(0x00ff99)
+          .setFooter({ text: "Link expires in 10 minutes. You only need to verify once." });
 
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to get verification link.";
+        await interaction.reply({
+          content: `❌ ${message}`,
+          ephemeral: true,
+        });
+      }
     }
 
     // /createverifyembed
@@ -138,15 +199,25 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   if (interaction.isButton()) {
     if (interaction.customId === "verify_button") {
       const discordId = interaction.user.id;
-      const link = `${FRONTEND_URL}/verify?discordId=${discordId}`;
+      try {
+        const { token } = await issueVerifyToken(discordId);
+        const link = `${VERIFY_LINK_BASE}?token=${token}`;
 
-      const embed = new EmbedBuilder()
-        .setTitle("Verify Your Wallet")
-        .setDescription(`[Click here to verify your wallet](${link})`)
-        .setColor(0x00ff99)
-        .setFooter({ text: "You only need to verify once." });
+        const embed = new EmbedBuilder()
+          .setTitle("Verify Your Wallet")
+          .setDescription(`[Click here to verify your wallet](${link})`)
+          .setColor(0x00ff99)
+          .setFooter({ text: "Link expires in 10 minutes. You only need to verify once." });
 
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to get verification link.";
+        await interaction.reply({
+          content: `❌ ${message}`,
+          ephemeral: true,
+        });
+      }
     }
   }
 });
