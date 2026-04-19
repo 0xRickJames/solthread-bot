@@ -15,6 +15,8 @@ import {
   PermissionFlagsBits,
 } from "discord.js";
 import type { Interaction } from "discord.js";
+import { Connection, PublicKey } from "@solana/web3.js";
+import { MongoClient } from "mongodb";
 
 const {
   DISCORD_TOKEN,
@@ -23,6 +25,15 @@ const {
   FRONTEND_URL,
   PORT,
   BOT_INTERNAL_SECRET,
+  MONGODB_URI,
+  SOLANA_RPC,
+  TOKEN_MINT,
+  ROLE_ANY,
+  ROLE_1K,
+  ROLE_10K,
+  ROLE_100K,
+  ROLE_LP,
+  REFRESH_INTERVAL_MS,
 } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !FRONTEND_URL || !BOT_INTERNAL_SECRET) {
@@ -32,6 +43,41 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !FRONTEND_URL || !BOT_INTERNAL_
 
 const VERIFY_API_URL = "https://verify.omnipair.fi/api/issue-verify-token";
 const VERIFY_LINK_BASE = "https://verify.omnipair.fi/verify";
+
+const MANAGED_ROLES = [ROLE_ANY, ROLE_1K, ROLE_10K, ROLE_100K, ROLE_LP].filter(Boolean) as string[];
+
+const OMFG_MINT = "omfgRBnxHsNJh6YeGbGAmWenNkenzsXyBXm3WDhmeta";
+const INDEXER_URL = "https://api.indexer.omnipair.fi/api/v1/positions/liquidity";
+
+interface LiquidityPosition {
+  signer: string;
+  token0Mint: string;
+  token1Mint: string;
+  lpAmount: string;
+}
+
+async function fetchLpHolderWallets(): Promise<Set<string>> {
+  const holders = new Set<string>();
+  let offset = 0;
+
+  while (true) {
+    const res = await fetch(`${INDEXER_URL}?status=open&limit=100&offset=${offset}`);
+    if (!res.ok) throw new Error(`Indexer API error: ${res.status}`);
+    const { data } = await res.json() as { data: { positions: LiquidityPosition[]; pagination: { hasNext: boolean } } };
+
+    for (const p of data.positions) {
+      const isOmfgPair = p.token0Mint === OMFG_MINT || p.token1Mint === OMFG_MINT;
+      if (isOmfgPair && BigInt(p.lpAmount) > 0n) {
+        holders.add(p.signer);
+      }
+    }
+
+    if (!data.pagination.hasNext) break;
+    offset += 100;
+  }
+
+  return holders;
+}
 
 interface IssueTokenResponse {
   token: string;
@@ -73,6 +119,114 @@ async function issueVerifyToken(discordId: string): Promise<IssueTokenResponse> 
   return res.data;
 }
 
+// Shared role sync — add/remove only the roles we manage
+async function syncMemberRoles(discordId: string, roles: string[]) {
+  const guild = await client.guilds.fetch(GUILD_ID!);
+  const member = await guild.members.fetch(discordId);
+  const currentRoles = member.roles.cache.map((r) => r.id);
+
+  const rolesToRemove = currentRoles.filter(
+    (id) => MANAGED_ROLES.includes(id) && !roles.includes(id)
+  );
+  const rolesToAdd = roles.filter((id) => !currentRoles.includes(id));
+
+  for (const roleId of rolesToRemove) {
+    try {
+      await member.roles.remove(roleId);
+      console.log(`Removed role ${roleId} from ${discordId}`);
+    } catch (err) {
+      console.error(`Failed to remove role ${roleId} from ${discordId}:`, err);
+    }
+  }
+
+  for (const roleId of rolesToAdd) {
+    try {
+      await member.roles.add(roleId);
+      console.log(`Assigned role ${roleId} to ${discordId}`);
+    } catch (err) {
+      console.error(`Failed to assign role ${roleId} to ${discordId}:`, err);
+    }
+  }
+}
+
+// Background job: re-check all verified wallets and sync roles
+async function refreshAllRoles() {
+  if (!MONGODB_URI || !SOLANA_RPC || !TOKEN_MINT) {
+    console.warn("refreshAllRoles: MONGODB_URI, SOLANA_RPC, or TOKEN_MINT not set — skipping.");
+    return;
+  }
+
+  console.log("refreshAllRoles: starting run...");
+  const mongo = new MongoClient(MONGODB_URI);
+
+  try {
+    await mongo.connect();
+    const wallets = await mongo
+      .db()
+      .collection("wallets")
+      .find({ status: "active" })
+      .toArray();
+
+    // Group wallet addresses by discordId
+    const byUser: Record<string, string[]> = {};
+    for (const w of wallets) {
+      if (!byUser[w.discordId]) byUser[w.discordId] = [];
+      byUser[w.discordId].push(w.address);
+    }
+
+    const conn = new Connection(SOLANA_RPC, "confirmed");
+    const tokenMint = new PublicKey(TOKEN_MINT);
+
+    let lpHolders = new Set<string>();
+    try {
+      lpHolders = await fetchLpHolderWallets();
+      console.log(`refreshAllRoles: ${lpHolders.size} LP holder wallets found`);
+    } catch (err) {
+      console.error("refreshAllRoles: failed to fetch LP holders, skipping LP role:", err);
+    }
+
+    let updated = 0;
+    let skipped = 0;
+
+    for (const [discordId, addresses] of Object.entries(byUser)) {
+      let total = 0;
+      for (const addr of addresses) {
+        try {
+          const accounts = await conn.getParsedTokenAccountsByOwner(
+            new PublicKey(addr),
+            { mint: tokenMint }
+          );
+          for (const acc of accounts.value) {
+            total += acc.account.data.parsed.info.tokenAmount.uiAmount || 0;
+          }
+        } catch (err) {
+          console.error(`refreshAllRoles: failed to check balance for ${addr}:`, err);
+        }
+      }
+
+      const roles: string[] = [];
+      if (total > 0 && ROLE_ANY) roles.push(ROLE_ANY);
+      if (total >= 1_000 && ROLE_1K) roles.push(ROLE_1K);
+      if (total >= 10_000 && ROLE_10K) roles.push(ROLE_10K);
+      if (total >= 100_000 && ROLE_100K) roles.push(ROLE_100K);
+      if (ROLE_LP && addresses.some((addr) => lpHolders.has(addr))) roles.push(ROLE_LP);
+
+      try {
+        await syncMemberRoles(discordId, roles);
+        updated++;
+      } catch (err) {
+        // Member may have left the guild
+        console.warn(`refreshAllRoles: could not sync roles for ${discordId}:`, err);
+        skipped++;
+      }
+    }
+
+    console.log(`refreshAllRoles: done. ${updated} updated, ${skipped} skipped.`);
+  } finally {
+    await mongo.close();
+  }
+}
+
 // Initialize Discord bot
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
@@ -82,8 +236,17 @@ const client = new Client({
 const app = express();
 app.use(bodyParser.json());
 
-// Bot Ready
-client.once("ready", () => console.log(`Logged in as ${client.user?.tag}`));
+// Bot Ready — start background refresh loop
+client.once("ready", () => {
+  console.log(`Logged in as ${client.user?.tag}`);
+
+  const intervalMs = parseInt(REFRESH_INTERVAL_MS || "") || 60 * 60 * 1000; // default: 1 hour
+  console.log(`Role refresh scheduled every ${intervalMs / 1000}s`);
+
+  // Run once shortly after startup, then on interval
+  setTimeout(() => refreshAllRoles(), 30_000);
+  setInterval(() => refreshAllRoles(), intervalMs);
+});
 
 // Register slash commands
 const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
@@ -226,7 +389,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   }
 });
 
-// Webhook to assign roles (now refreshes roles fully)
+// Webhook to assign roles
 app.post("/webhook", async (req, res) => {
   console.log("Incoming webhook payload:", req.body);
   const { discordId, roles } = req.body;
@@ -237,53 +400,7 @@ app.post("/webhook", async (req, res) => {
   }
 
   try {
-    const guild = await client.guilds.fetch(GUILD_ID!);
-    const member = await guild.members.fetch(discordId);
-
-    // Get current roles assigned to the member in the guild
-    const currentRoles = member.roles.cache.map((r) => r.id);
-
-    // Your role IDs from environment
-    const managedRoles = [
-      process.env.ROLE_ANY,
-      process.env.ROLE_1K,
-      process.env.ROLE_10K,
-      process.env.ROLE_100K,
-    ].filter(Boolean);
-
-    // Determine which roles to remove (ones we manage but aren't in new list)
-    const rolesToRemove = currentRoles.filter(
-      (roleId) => managedRoles.includes(roleId) && !roles.includes(roleId)
-    );
-
-    // Determine which roles to add (in new list but not currently assigned)
-    const rolesToAdd = roles.filter(
-      (roleId: string) => !currentRoles.includes(roleId)
-    );
-
-    // Remove outdated roles
-    for (const roleId of rolesToRemove) {
-      try {
-        await member.roles.remove(roleId);
-        console.log(`Removed role ${roleId} from ${discordId}`);
-      } catch (err) {
-        console.error(
-          `Failed to remove role ${roleId} from ${discordId}:`,
-          err
-        );
-      }
-    }
-
-    // Add new roles
-    for (const roleId of rolesToAdd) {
-      try {
-        await member.roles.add(roleId);
-        console.log(`Assigned role ${roleId} to ${discordId}`);
-      } catch (err) {
-        console.error(`Failed to assign role ${roleId} to ${discordId}:`, err);
-      }
-    }
-
+    await syncMemberRoles(discordId, roles);
     res.send("Roles synchronized");
   } catch (err) {
     console.error("Error assigning roles:", err);
